@@ -1,2 +1,5 @@
-idf_component_register(SRCS "main.c" "esp_profiler.c"
-                       INCLUDE_DIRS ".")
+idf_component_register(
+    SRCS "main.c" "profiler.c" "workload.c"
+    INCLUDE_DIRS "."
+    PRIV_REQUIRES nvs_flash esp_driver_tsens driver
+)

@@ -3,40 +3,58 @@
 
 #include <stdint.h>
 #include <stdbool.h>
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
 
-// Telemetry Operational Modes
+#define DEADLINE_US             10000
+#define GUARD_TIME_US           200 // needed?
+#define MAX_SYSTEM_TASKS        32
+
+// Telemetry Utility 
+#define UTIL_BASELINE           0.00f
+#define UTIL_M0                 0.80f
+#define UTIL_M1                 0.90f
+#define UTIL_M2                 1.00f
+#define PENALTY_DEADLINE_MISS   1.00f
+
 typedef enum {
-    MODE_M0_MINIMAL  = 0, // Tier 1 only (Safety-critical bounds)
-    MODE_M1_STANDARD = 1, // Tier 1 + Tier 2 (State & execution checkpoints)
-    MODE_M2_FULL     = 2  // Tier 1 + Tier 2 + Tier 3 (High-frequency trace)
-} profiler_mode_t;
+    PROFILER_MODE_OFF = 0,
+    PROFILER_MODE_M0_MINIMAL,
+    PROFILER_MODE_M1_STANDARD,
+    PROFILER_MODE_M2_FULL
+} ProfilerMode_t;
 
-// Telemetry Event Tiers
 typedef enum {
-    TIER_1_CRITICAL = 0,
-    TIER_2_STATE    = 1,
-    TIER_3_TRACE    = 2
-} event_tier_t;
+    PHASE_CONTROL_NO_PROFILING = 0,
+    PHASE_STATIC_MAX_TELEMETRY,
+    PHASE_PROPOSED_ADAPTIVE
+} ExperimentPhase_t;
 
-// Real Hardware Telemetry Ring Buffer Packet
 typedef struct {
-    uint64_t timestamp_us;
-    uint32_t event_id;
-    uint8_t  core_id;
-    char     tag[16];
-    uint32_t free_heap_bytes;
-    uint32_t stack_hwm_bytes;
-} TelemetryPacket_t;
+    uint32_t total_runs;
+    uint32_t deadline_misses;
+    uint32_t off_count;
+    uint32_t m0_count;
+    uint32_t m1_count;
+    uint32_t m2_count;
+    float accrued_utility;
+    uint64_t min_latency_us;
+    uint64_t max_latency_us;
+    uint64_t total_latency_us;
+    uint64_t p95_latency_us;
+    uint64_t p99_latency_us;
+} ExperimentStats_t;
 
-// Schedulability Thresholds for Gatekeeper Engine (Microseconds)
-#define SLACK_HIGH_THRESHOLD_US  1200   // >= 1.2ms slack -> Mode M2
-#define SLACK_LOW_THRESHOLD_US   400    // >= 0.4ms slack -> Mode M1
+extern uint32_t measured_overhead_m0_wcet_us;
+extern uint32_t measured_overhead_m1_wcet_us;
+extern uint32_t measured_overhead_m2_wcet_us;
 
-// Profiler Engine API
+extern uint32_t slack_threshold_m2_us;
+extern uint32_t slack_threshold_m1_us;
+extern uint32_t slack_threshold_m0_us;
+
 void profiler_init(void);
-profiler_mode_t profiler_evaluate_mode(uint64_t slack_us);
-void profiler_log_event(event_tier_t tier, uint32_t event_id, const char *tag, profiler_mode_t active_mode, bool is_adaptive);
+void calibrate_profiler_overheads(void);
+void esp_profiler_execute_sample(ProfilerMode_t mode);
+ProfilerMode_t select_profiler_mode(int64_t raw_slack_us);
+uint32_t percentile_index(float p, uint32_t n);
 
-#endif // PROFILER_H
+#endif

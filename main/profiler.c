@@ -12,16 +12,19 @@
 
 static const char *TAG = "PROFILER";
 
-// Hardware & Queue handles
 static temperature_sensor_handle_t temp_handle = NULL;
 static QueueHandle_t example_queue = NULL;
 
-// Calibrated overhead globals declared in profiler.h
-uint32_t measured_overhead_m0_us = 0;
-uint32_t measured_overhead_m1_us = 0;
-uint32_t measured_overhead_m2_us = 0;
+static TaskStatus_t static_task_status_array[MAX_SYSTEM_TASKS];
 
-// Data payload structure for heavy M2 sampling
+uint32_t measured_overhead_m0_wcet_us = 0;
+uint32_t measured_overhead_m1_wcet_us = 0;
+uint32_t measured_overhead_m2_wcet_us = 0;
+
+uint32_t slack_threshold_m2_us = 0;
+uint32_t slack_threshold_m1_us = 0;
+uint32_t slack_threshold_m0_us = 0;
+
 typedef struct {
     float temp_celsius;
     float heap_fragmentation;
@@ -30,7 +33,6 @@ typedef struct {
 } profiler_m2_data_t;
 
 void profiler_init(void) {
-    // Initialize temperature sensor peripheral
     temperature_sensor_config_t temp_sensor_config = {
         .range_min = -10,
         .range_max = 80,
@@ -39,22 +41,13 @@ void profiler_init(void) {
         temperature_sensor_enable(temp_handle);
     }
 
-    // Initialize mock queue for IPC metric monitoring
     example_queue = xQueueCreate(10, sizeof(int));
+    memset(static_task_status_array, 0, sizeof(static_task_status_array));
 }
 
-// ------------------------------------------------------------------
-// Mode Implementation Execution
-// ------------------------------------------------------------------
-
 static void execute_m0(void) {
-    // 1. Hardware Cycle Counter Snapshot
     uint32_t cycles = esp_cpu_get_cycle_count();
-
-    // 2. Minimum Heap Watermark Read (Atomic stored value read)
     size_t min_heap = esp_get_minimum_free_heap_size();
-
-    // 3. Current Task Handle Snapshot
     TaskHandle_t handle = xTaskGetCurrentTaskHandle();
 
     (void)cycles;
@@ -63,17 +56,13 @@ static void execute_m0(void) {
 }
 
 static void execute_m1(void) {
-    // 1. Current Free Heap Check
     size_t free_heap = esp_get_free_heap_size();
-
-    // 2. Heap Fragmentation Ratio
     size_t largest_block = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
     float fragmentation = 0.0f;
     if (free_heap > 0) {
         fragmentation = 1.0f - ((float)largest_block / (float)free_heap);
     }
 
-    // 3. IPC Queue Occupancy Check
     UBaseType_t msgs_waiting = 0;
     UBaseType_t spaces_left = 0;
     if (example_queue != NULL) {
@@ -91,12 +80,10 @@ static void execute_m2(void) {
     profiler_m2_data_t data;
     memset(&data, 0, sizeof(profiler_m2_data_t));
 
-    // 1. Peripheral Analog Hardware Read
     if (temp_handle != NULL) {
         temperature_sensor_get_celsius(temp_handle, &data.temp_celsius);
     }
 
-    // 2. Heap Memory Heap Block Search & Fragmentation
     size_t free_heap = esp_get_free_heap_size();
     size_t largest_block = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
     data.heap_fragmentation = 0.0f;
@@ -104,32 +91,18 @@ static void execute_m2(void) {
         data.heap_fragmentation = 1.0f - ((float)largest_block / (float)free_heap);
     }
 
-    // 3. Full Task Table Traversal and Stack Watermarking Scan
-    UBaseType_t task_array_size = uxTaskGetNumberOfTasks();
-    TaskStatus_t *task_status_array = pvPortMalloc(task_array_size * sizeof(TaskStatus_t));
+    uint32_t total_run_time = 0;
+    data.task_count = uxTaskGetSystemState(static_task_status_array, MAX_SYSTEM_TASKS, &total_run_time);
 
-    if (task_status_array != NULL) {
-        uint32_t total_run_time = 0;
-        data.task_count = uxTaskGetSystemState(task_status_array, task_array_size, &total_run_time);
-
-        // Linear memory scan across active task stack frames
-        for (UBaseType_t i = 0; i < data.task_count; i++) {
-            UBaseType_t stack_watermark = uxTaskGetStackHighWaterMark(task_status_array[i].xHandle);
-            (void)stack_watermark;
-        }
-
-        vPortFree(task_status_array);
+    for (UBaseType_t i = 0; i < data.task_count; i++) {
+        UBaseType_t stack_watermark = uxTaskGetStackHighWaterMark(static_task_status_array[i].xHandle);
+        (void)stack_watermark;
     }
 
-    // 4. String Serialization & Formatting Overhead
     snprintf(data.formatted_json, sizeof(data.formatted_json),
              "{\"temp\":%.2f,\"frag\":%.2f,\"tasks\":%u,\"free_heap\":%u}",
              data.temp_celsius, data.heap_fragmentation, (unsigned int)data.task_count, (unsigned int)free_heap);
 }
-
-// ------------------------------------------------------------------
-// Core Interface Functions
-// ------------------------------------------------------------------
 
 void esp_profiler_execute_sample(ProfilerMode_t mode) {
     switch (mode) {
@@ -142,55 +115,64 @@ void esp_profiler_execute_sample(ProfilerMode_t mode) {
         case PROFILER_MODE_M2_FULL:
             execute_m2();
             break;
+        case PROFILER_MODE_OFF:
+        default:
+            break;
     }
 }
 
-ProfilerMode_t select_profiler_mode(int64_t residual_slack_us) {
-    if (residual_slack_us >= SLACK_THRESHOLD_M2_US) {
+ProfilerMode_t select_profiler_mode(int64_t raw_slack_us) {
+    if (raw_slack_us >= (int64_t)slack_threshold_m2_us) {
         return PROFILER_MODE_M2_FULL;
-    } else if (residual_slack_us >= SLACK_THRESHOLD_M1_US) {
+    } else if (raw_slack_us >= (int64_t)slack_threshold_m1_us) {
         return PROFILER_MODE_M1_STANDARD;
-    } else {
+    } else if (raw_slack_us >= (int64_t)slack_threshold_m0_us) {
         return PROFILER_MODE_M0_MINIMAL;
+    } else {
+        return PROFILER_MODE_OFF;
     }
 }
 
 void calibrate_profiler_overheads(void) {
-    uint64_t t_start, t_end;
-    const int iterations = 10;
+    uint64_t t_start;
+    const int iterations = 20;
 
-    // Calibrate M0
-    uint64_t sum_m0 = 0;
+    uint64_t max_m0 = 0;
     for (int i = 0; i < iterations; i++) {
         t_start = esp_timer_get_time();
         execute_m0();
-        t_end = esp_timer_get_time();
-        sum_m0 += (t_end - t_start);
+        uint64_t elapsed = esp_timer_get_time() - t_start;
+        if (elapsed > max_m0) max_m0 = elapsed;
     }
-    measured_overhead_m0_us = (uint32_t)(sum_m0 / iterations);
+    measured_overhead_m0_wcet_us = (uint32_t)max_m0;
 
-    // Calibrate M1
-    uint64_t sum_m1 = 0;
+    uint64_t max_m1 = 0;
     for (int i = 0; i < iterations; i++) {
         t_start = esp_timer_get_time();
         execute_m1();
-        t_end = esp_timer_get_time();
-        sum_m1 += (t_end - t_start);
+        uint64_t elapsed = esp_timer_get_time() - t_start;
+        if (elapsed > max_m1) max_m1 = elapsed;
     }
-    measured_overhead_m1_us = (uint32_t)(sum_m1 / iterations);
+    measured_overhead_m1_wcet_us = (uint32_t)max_m1;
 
-    // Calibrate M2
-    uint64_t sum_m2 = 0;
+    uint64_t max_m2 = 0;
     for (int i = 0; i < iterations; i++) {
         t_start = esp_timer_get_time();
         execute_m2();
-        t_end = esp_timer_get_time();
-        sum_m2 += (t_end - t_start);
+        uint64_t elapsed = esp_timer_get_time() - t_start;
+        if (elapsed > max_m2) max_m2 = elapsed;
     }
-    measured_overhead_m2_us = (uint32_t)(sum_m2 / iterations);
+    measured_overhead_m2_wcet_us = (uint32_t)max_m2;
 
-    ESP_LOGI(TAG, "Calibration Results -> M0: %lu us | M1: %lu us | M2: %lu us",
-             measured_overhead_m0_us, measured_overhead_m1_us, measured_overhead_m2_us);
+    /* is guard time needed?*/
+    slack_threshold_m2_us = measured_overhead_m2_wcet_us + GUARD_TIME_US;
+    slack_threshold_m1_us = measured_overhead_m1_wcet_us + GUARD_TIME_US;
+    slack_threshold_m0_us = measured_overhead_m0_wcet_us + GUARD_TIME_US;
+
+    ESP_LOGI(TAG, "Empirical WCET Calibration -> M0: %lu us | M1: %lu us | M2: %lu us",
+             measured_overhead_m0_wcet_us, measured_overhead_m1_wcet_us, measured_overhead_m2_wcet_us);
+    ESP_LOGI(TAG, "Derived Decision Thresholds -> M0: %lu us | M1: %lu us | M2: %lu us",
+             slack_threshold_m0_us, slack_threshold_m1_us, slack_threshold_m2_us);
 }
 
 uint32_t percentile_index(float p, uint32_t n) {

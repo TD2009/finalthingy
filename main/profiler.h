@@ -24,7 +24,9 @@ typedef enum {
 
 typedef enum {
     PHASE_CONTROL_NO_PROFILING = 0,
-    PHASE_STATIC_MAX_TELEMETRY,
+    PHASE_M0_TELEMETRY,
+    PHASE_M1_TELEMETRY,
+    PHASE_M2_TELEMETRY,
     PHASE_PROPOSED_ADAPTIVE
 } ExperimentPhase_t;
 

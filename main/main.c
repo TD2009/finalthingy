@@ -47,8 +47,16 @@ static void run_experiment_phase(ExperimentPhase_t phase, uint32_t seed, Experim
         if (phase == PHASE_CONTROL_NO_PROFILING) {
             active_mode = PROFILER_MODE_OFF;
         }
-        else if (phase == PHASE_STATIC_MAX_TELEMETRY) {
+        else if (phase == PHASE_M2_TELEMETRY) {
             active_mode = PROFILER_MODE_M2_FULL;
+            esp_profiler_execute_sample(active_mode);
+        }
+        else if (phase == PHASE_M1_TELEMETRY) {
+            active_mode = PROFILER_MODE_M1_STANDARD;
+            esp_profiler_execute_sample(active_mode);
+        }
+        else if (phase == PHASE_M0_TELEMETRY) {
+            active_mode = PROFILER_MODE_M0_MINIMAL;
             esp_profiler_execute_sample(active_mode);
         }
         else if (phase == PHASE_PROPOSED_ADAPTIVE) {
@@ -125,6 +133,7 @@ static void print_aggregated_summary(const char *phase_name, const ExperimentSta
     float dmr_sum = 0.0f, uar_sum = 0.0f;
     float avg_lat_sum = 0.0f, p95_sum = 0.0f, p99_sum = 0.0f;
     
+    uint64_t m0_sum = 0, m1_sum = 0, m2_sum = 0, off_sum = 0;
     float dmrs[num_seeds];
     float uars[num_seeds];
 
@@ -142,6 +151,11 @@ static void print_aggregated_summary(const char *phase_name, const ExperimentSta
         avg_lat_sum += avg_lat;
         p95_sum += (float)runs[i].p95_latency_us;
         p99_sum += (float)runs[i].p99_latency_us;
+
+        off_sum += runs[i].off_count;
+        m0_sum += runs[i].m0_count;
+        m1_sum += runs[i].m1_count;
+        m2_sum += runs[i].m2_count;
     }
 
     float dmr_mean = dmr_sum / (float)num_seeds;
@@ -153,6 +167,11 @@ static void print_aggregated_summary(const char *phase_name, const ExperimentSta
         uar_var_sum += (uars[i] - uar_mean) * (uars[i] - uar_mean);
     }
 
+    float avg_off = (float)off_sum / (float)num_seeds;
+    float avg_m0  = (float)m0_sum  / (float)num_seeds;
+    float avg_m1  = (float)m1_sum  / (float)num_seeds;
+    float avg_m2  = (float)m2_sum  / (float)num_seeds;
+
     float dmr_stddev = sqrtf(dmr_var_sum / (float)num_seeds);
     float uar_stddev = sqrtf(uar_var_sum / (float)num_seeds);
 
@@ -161,6 +180,11 @@ static void print_aggregated_summary(const char *phase_name, const ExperimentSta
     ESP_LOGI(TAG, "==================================================");
     ESP_LOGI(TAG, " DMR (Mean +/- StdDev) : %.2f%% (+/- %.2f%%)", dmr_mean, dmr_stddev);
     ESP_LOGI(TAG, " UAR (Mean +/- StdDev) : %.2f%% (+/- %.2f%%)", uar_mean, uar_stddev);
+    ESP_LOGI(TAG, " Mode Selection (Avg)  : M0=%.1f (%.1f%%) | M1=%.1f (%.1f%%) | M2=%.1f (%.1f%%) | OFF=%.1f (%.1f%%)",
+                avg_m0, (avg_m0 / (float)NUM_ITERATIONS) * 100.0f,
+                avg_m1, (avg_m1 / (float)NUM_ITERATIONS) * 100.0f,
+                avg_m2, (avg_m2 / (float)NUM_ITERATIONS) * 100.0f,
+                avg_off, (avg_off / (float)NUM_ITERATIONS) * 100.0f);
     ESP_LOGI(TAG, " Mean Frame Latency    : %.2f us", avg_lat_sum / (float)num_seeds);
     ESP_LOGI(TAG, " Mean Tail Latency     : p95=%.1f us | p99=%.1f us", p95_sum / (float)num_seeds, p99_sum / (float)num_seeds);
     ESP_LOGI(TAG, "==================================================\n");
@@ -172,9 +196,11 @@ void app_main(void) {
     calibrate_profiler_overheads();
     calibrate_workload_kernel();
 
-    ExperimentStats_t control_runs[NUM_SEEDS];
-    ExperimentStats_t static_runs[NUM_SEEDS];
-    ExperimentStats_t adaptive_runs[NUM_SEEDS];
+    static ExperimentStats_t control_runs[NUM_SEEDS];
+    static ExperimentStats_t m0_runs[NUM_SEEDS];
+    static ExperimentStats_t m1_runs[NUM_SEEDS];
+    static ExperimentStats_t m2_runs[NUM_SEEDS];
+    static ExperimentStats_t adaptive_runs[NUM_SEEDS];
 
     for (size_t s = 0; s < NUM_SEEDS; s++) {
         uint32_t current_seed = seeds[s];
@@ -183,8 +209,14 @@ void app_main(void) {
         run_experiment_phase(PHASE_CONTROL_NO_PROFILING, current_seed, &control_runs[s]);
         print_benchmark_summary("Control (No Profiling)", current_seed, &control_runs[s]);
 
-        run_experiment_phase(PHASE_STATIC_MAX_TELEMETRY, current_seed, &static_runs[s]);
-        print_benchmark_summary("Static Max (Always-M2)", current_seed, &static_runs[s]);
+        run_experiment_phase(PHASE_M0_TELEMETRY, current_seed, &m0_runs[s]);
+        print_benchmark_summary("M0 Max", current_seed, &m0_runs[s]);
+
+        run_experiment_phase(PHASE_M1_TELEMETRY, current_seed, &m1_runs[s]);
+        print_benchmark_summary("M1 Max", current_seed, &m1_runs[s]);
+
+        run_experiment_phase(PHASE_M2_TELEMETRY, current_seed, &m2_runs[s]);
+        print_benchmark_summary("M2 Max", current_seed, &m2_runs[s]);
 
         run_experiment_phase(PHASE_PROPOSED_ADAPTIVE, current_seed, &adaptive_runs[s]);
         print_benchmark_summary("Proposed Slack-Aware Adaptive", current_seed, &adaptive_runs[s]);
@@ -195,6 +227,8 @@ void app_main(void) {
     ESP_LOGI(TAG, "**************************************************\n");
 
     print_aggregated_summary("Control (No Profiling)", control_runs, NUM_SEEDS);
-    print_aggregated_summary("Static Max (Always-M2)", static_runs, NUM_SEEDS);
+    print_aggregated_summary("M0 Max (Telemetry)", m0_runs, NUM_SEEDS);
+    print_aggregated_summary("M1 Max (Telemetry)", m1_runs, NUM_SEEDS);
+    print_aggregated_summary("M2 Max (Telemetry)", m2_runs, NUM_SEEDS);
     print_aggregated_summary("Proposed Slack-Aware Adaptive", adaptive_runs, NUM_SEEDS);
 }

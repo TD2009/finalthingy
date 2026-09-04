@@ -5,7 +5,7 @@
 #include <stdbool.h>
 
 #define DEADLINE_US             10000
-#define GUARD_TIME_US           200 // needed?
+#define GUARD_TIME_US           0 // needed?
 #define MAX_SYSTEM_TASKS        32
 
 // Telemetry Utility 
@@ -13,7 +13,7 @@
 #define UTIL_M0                 0.80f
 #define UTIL_M1                 0.90f
 #define UTIL_M2                 1.00f
-#define PENALTY_DEADLINE_MISS   1.00f
+#define PENALTY_DEADLINE_MISS   2.00f
 
 typedef enum {
     PROFILER_MODE_OFF = 0,

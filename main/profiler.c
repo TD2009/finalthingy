@@ -35,6 +35,12 @@ typedef struct {
     float heap_fragmentation;
     UBaseType_t task_count;
     char formatted_json[256];
+
+    uint32_t internal_free_heap;
+    uint32_t dma_free_heap;
+    uint32_t spiram_free_heap;
+    uint32_t internal_largest_block;
+    uint32_t internal_alloc_blocks;
 } profiler_data_t;
 
 static profiler_data_t data;
@@ -52,7 +58,17 @@ void profiler_init(void) {
     example_queue = xQueueCreate(10, sizeof(int));
     memset(static_task_status_array, 0, sizeof(static_task_status_array));
     memset(&data, 0, sizeof(profiler_data_t));
+}
 
+static uint32_t calculate_crc32(const char *data_str) {
+    uint32_t crc = 0xFFFFFFFF;
+    for (const char *p = data_str; *p != '\0'; p++) {
+        crc ^= (uint8_t)(*p);
+        for (int b = 0; b < 8; b++) {
+            crc = (crc >> 1) ^ (0xEDB88320 & (-(crc & 1)));
+        }
+    }
+    return ~crc;
 }
 
 static void execute_m0(void) {
@@ -91,17 +107,54 @@ static void execute_m2(void) {
         temperature_sensor_get_celsius(temp_handle, &data.temp_celsius);
     }
 
+    const uint32_t heap_capabilities[] = {
+        MALLOC_CAP_INTERNAL,
+        MALLOC_CAP_DMA,
+        MALLOC_CAP_32BIT,
+        MALLOC_CAP_8BIT
+#if CONFIG_SPIRAM
+        , MALLOC_CAP_SPIRAM
+#endif
+    };
+
+    data.internal_free_heap = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    data.dma_free_heap      = heap_caps_get_free_size(MALLOC_CAP_DMA);
+
+#if CONFIG_SPIRAM
+    data.spiram_free_heap   = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+#else
+    data.spiram_free_heap   = 0;
+#endif
+
+    multi_heap_info_t heap_info;
+    for (size_t i = 0; i < sizeof(heap_capabilities) / sizeof(heap_capabilities[0]); i++) {
+        heap_caps_get_info(&heap_info, heap_capabilities[i]);
+    }
+    data.internal_largest_block = heap_info.largest_free_block;
+    data.internal_alloc_blocks  = heap_info.allocated_blocks;
+
+    TaskStatus_t task_details;
     for (UBaseType_t i = 0; i < data.task_count; i++) {
-        UBaseType_t stack_watermark = uxTaskGetStackHighWaterMark(static_task_status_array[i].xHandle);
-        (void)stack_watermark;
+        if (static_task_status_array[i].xHandle != NULL) {
+            vTaskGetInfo(static_task_status_array[i].xHandle, &task_details, pdTRUE, eInvalid);
+            (void)task_details;
+        }
     }
 
     snprintf(data.formatted_json, sizeof(data.formatted_json),
-             "{\"temp\":%.2f,\"frag\":%.2f,\"tasks\":%u,\"free_heap\":%u}",
+             "{\"temp\":%.2f,\"frag\":%.2f,\"tasks\":%u,\"free_heap\":%u,"
+             "\"int_free\":%u,\"dma_free\":%u,\"int_largest\":%u,\"alloc_blocks\":%u}",
              data.temp_celsius,
              data.heap_fragmentation,
              (unsigned int)data.task_count,
-             (unsigned int)data.free_heap);
+             (unsigned int)data.free_heap,
+             (unsigned int)data.internal_free_heap,
+             (unsigned int)data.dma_free_heap,
+             (unsigned int)data.internal_largest_block,
+             (unsigned int)data.internal_alloc_blocks);
+
+    uint32_t payload_crc = calculate_crc32(data.formatted_json);
+    (void)payload_crc;
 }
 
 void esp_profiler_execute_sample(ProfilerMode_t mode) {
